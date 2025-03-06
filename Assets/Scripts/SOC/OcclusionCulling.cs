@@ -28,7 +28,10 @@ public class OcclusionCulling : MonoBehaviour
     private Matrix4x4 vpMatrix;
 
     #region Debug Property
+    [Header("Debug")]
     public int occluderCount = 0;
+    public int occludeeCount = 0;
+    public bool needDebug = false;
     #endregion
 
     #region Frustum Culling
@@ -48,18 +51,26 @@ public class OcclusionCulling : MonoBehaviour
     private List<int> _triangleIndexVertexTemp;
     //private VertexInfo[] _occluderVertexTempArray;
     //private VertexInfo[] _occludeeBoundsVertexTempArray;
-    private NativeArray<VertexInfo> _occluderVerextInfo;
+    // 存储物体顶点的局部坐标
+    private NativeArray<VertexInfo> _occluderVertexInfo;
     private NativeArray<VertexInfo> _occludeeBoundsVertexInfo;
+    // 存储遮挡者三角形索引信息
     private NativeList<int4> _occluderTriangleIndex; // （v0,v1,v2,该mesh的顶点起始索引）
     private int _occluderTriangleCount;
+    // 物体顶点M矩阵
     private NativeList<float4x4> _occluderMatrixList;
     private NativeList<float4x4> _occludeeMatrixList;
+    // 裁剪空间坐标
     private NativeArray<float4> _occluderClipVertexInfo;
     private NativeArray<float4> _occludeeClipVertexInfo;
     #endregion
 
-    #region Collect Triangle Info
+    #region Collect Occluder Triangle Info
     private NativeList<TriangleInfo> _occluderTriangleInfoList;
+    #endregion
+
+    #region Collect Occludee Bounds Info
+    private NativeArray<ScreenBoundsInfo> _occludeeBoundsInfoArray;
     #endregion
 
 
@@ -68,6 +79,7 @@ public class OcclusionCulling : MonoBehaviour
 
     void Awake()
     {
+        JobsUtility.JobWorkerCount = 4;
         _mainCamera = Camera.main;
         //Init();
         _screenWidth = Screen.width;
@@ -89,7 +101,7 @@ public class OcclusionCulling : MonoBehaviour
         _occluderVertexPosTempList = new List<Vector3>();
         _triangleIndexVertexTemp = new List<int>();
 
-        _occluderVerextInfo = new NativeArray<VertexInfo>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
+        _occluderVertexInfo = new NativeArray<VertexInfo>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
         _occludeeBoundsVertexInfo = new NativeArray<VertexInfo>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
 
         _occluderTriangleIndex = new NativeList<int4>(Allocator.Persistent);
@@ -100,6 +112,7 @@ public class OcclusionCulling : MonoBehaviour
         _occludeeClipVertexInfo = new NativeArray<float4>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
 
         _occluderTriangleInfoList = new NativeList<TriangleInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
+        _occludeeBoundsInfoArray = new NativeArray<ScreenBoundsInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
     }
     private void OnDestroy()
     {
@@ -115,6 +128,9 @@ public class OcclusionCulling : MonoBehaviour
         _occluderClipVertexInfo.Dispose();
         _occludeeClipVertexInfo.Dispose();
         _occluderTriangleInfoList.Dispose();
+        _occludeeBoundsInfoArray.Dispose();
+
+        JobsUtility.ResetJobWorkerCount();
     }
 
     // Update is called once per frame
@@ -141,6 +157,9 @@ public class OcclusionCulling : MonoBehaviour
         CollectOccluderTriangleInfo();
         Profiler.EndSample();
 
+        Profiler.BeginSample("Collect Occludee Bounds Info");
+        CollectOccludeeBoundsInfo();
+        Profiler.EndSample();
     }
 
     #region Frustum Culling
@@ -169,7 +188,8 @@ public class OcclusionCulling : MonoBehaviour
                 _inFrustumBounds.Add(new BoundsInfo()
                 {
                     center = bounds.center,
-                    extents = bounds.extents
+                    extents = bounds.extents,
+                    radius = bounds.extents.magnitude,
                 });
             }
             else
@@ -258,42 +278,59 @@ public class OcclusionCulling : MonoBehaviour
     #region Select Occluder
     private void SelectOccluder()
     {
+        if (needDebug)
+        {
+            foreach (var mf in _meshFilters)
+            {
+                MeshRenderer renderer = mf.GetComponent<MeshRenderer>();
+                Material material = renderer.material;
+                material.color = Color.white;
+            }
+        }
         _occluderMfIndex.Clear();
         _occludeeMfIndex.Clear();
-        //for (int i = 0; i < _objectCount; i++)
-        //{
-        //    Bounds bounds = _inFrustumBounds[i];
-        //    // 可能的优化 提前计算Camera的VP矩阵缓存
-        //    float screenRatio = CullingTools.CalculateScreenRatio(_mainCamera, bounds, _screenArea);
-        //    //Debug.Log(screenRatio);
-        //    if (screenRatio >= OCCLUDER_SCREEN_THREASHOLD)
-        //    {
-        //        _occluderMfIndex.Add(i);
-        //    }
-        //    else
-        //    {
-        //        _occludeeMfIndex.Add(i);
-        //    }
-        //}
         dependency = new OccluderCollectJob()
         {
-            vpMatrix = vpMatrix,
+            vMatrix = _mainCamera.worldToCameraMatrix,
+            pMatrix = _mainCamera.projectionMatrix,
+            viewOrigin = new float4(_mainCamera.transform.position, 0),
             screenArea = _screenArea,
+            screenHeight = _screenHeight,
+            screenWidth = _screenWidth,
             occluderMfIndex = _occluderMfIndex.AsParallelWriter(),
             occludeeMfIndex = _occludeeMfIndex.AsParallelWriter(),
             bounds = _inFrustumBounds
         }.Schedule(_objectCount, 16, dependency);
         //Debug.Log(occludeeCnt + " " + occluderCnt);
         dependency.Complete();
+        if (needDebug)
+        {
+            foreach (var idx in _occluderMfIndex)
+            {
+                MeshFilter mf = _meshFilters[idx];
+                MeshRenderer renderer = mf.GetComponent<MeshRenderer>();
+                Material material = renderer.material;
+                material.color = Color.red;
+            }
+        }
+        
     }
 
     [BurstCompile]
     private struct OccluderCollectJob : IJobParallelFor
     {
         [ReadOnly]
-        public Matrix4x4 vpMatrix;
+        public Matrix4x4 vMatrix;
+        [ReadOnly]
+        public Matrix4x4 pMatrix;
+        [ReadOnly]
+        public float4 viewOrigin;
         [ReadOnly]
         public float screenArea;
+        [ReadOnly]
+        public float screenWidth;
+        [ReadOnly]
+        public float screenHeight;
         [NativeDisableParallelForRestriction]
         public NativeList<int>.ParallelWriter occluderMfIndex;
         [NativeDisableParallelForRestriction]
@@ -303,27 +340,19 @@ public class OcclusionCulling : MonoBehaviour
         public void Execute(int index)
         {
             BoundsInfo boundsInfo = bounds[index];
-            float3 center = boundsInfo.center;
-            float3 ext = boundsInfo.extents;
+            float4 center = new float4(boundsInfo.center, 1);
+            float radius = boundsInfo.radius;
+            float dist = math.distance(center, viewOrigin);
 
-            // 计算屏幕坐标
-            float4 screenMin4 = math.mul(vpMatrix, new float4(center - ext, 1));
-            float4 screenMax4 = math.mul(vpMatrix, new float4(center + ext, 1));
-            screenMin4 /= screenMin4.w;
-            screenMax4 /= screenMax4.w;
+            float projScaleX = pMatrix.m00; // 对应水平方向缩放因子
+            float projScaleY = pMatrix.m11; // 对应垂直方向缩放因子
 
-            // 提取屏幕边界（原始跨度）
-            float screenLeft = Math.Min(screenMin4.x, screenMax4.x);
-            float screenRight = Math.Max(screenMin4.x, screenMax4.x);
-            float screenBottom = Math.Min(screenMin4.y, screenMax4.y);
-            float screenTop = Math.Max(screenMin4.y, screenMax4.y);
-
-            // 计算有效宽度和高度
-            float width = Math.Max(0f, screenRight - screenLeft);
-            float height = Math.Max(0f, screenTop - screenBottom);
-
-            // 投影面积占比
-            float screenRatio = width * height;
+            // 4. 计算屏幕空间缩放因子（考虑视口分辨率）
+            float screenScaleX = 0.5f * screenWidth * projScaleX;
+            float screenScaleY = 0.5f * screenHeight * projScaleY;
+            float screenMultiple = math.max(screenScaleX, screenScaleY);
+            float screenRadius = screenMultiple * radius / math.max(1.0f, dist);
+            float screenRatio = math.PI * screenRadius * screenRadius / screenArea;
 
             if (screenRatio >= OCCLUDER_SCREEN_THREASHOLD)
             {
@@ -381,7 +410,7 @@ public class OcclusionCulling : MonoBehaviour
             {
                 Vector3 vertex = _occluderVertexPosTempList[j];
                 //Debug.Log(occulderVertexCount);
-                _occluderVerextInfo[occulderVertexCount++] = new VertexInfo()
+                _occluderVertexInfo[occulderVertexCount++] = new VertexInfo()
                 {
                     vertex = vertex,
                     modelMatrixIndex = matrixIndex
@@ -399,13 +428,14 @@ public class OcclusionCulling : MonoBehaviour
         dependency = new VertexTransferJob()
         {
             vpMatrix = vpMatrix,
-            vertexInfos = _occluderVerextInfo,
+            vertexInfos = _occluderVertexInfo,
             modelMatrixList = _occluderMatrixList,
             ClipVertexResult = _occluderClipVertexInfo
         }.Schedule(occulderVertexCount, 16, dependency);
 
         Profiler.EndSample();
 
+        occludeeCount = _occludeeMfIndex.Length;
         Profiler.BeginSample("Collect Occludee Vertex");
         //被遮挡物记录包围盒
         int occludeeVertexCount = 0;
@@ -536,13 +566,13 @@ public class OcclusionCulling : MonoBehaviour
             float4 v2 = vertexClip[triangleIdx.z + triangleIdx.w];
 
             bool neadClip = CullingTools.TriangleClip(v0, v1, v2);
-
             if (!neadClip)
             {
                 //转换NDC坐标
                 float4 ndcV0 = v0 / v0.w;
                 float4 ndcV1 = v1 / v1.w;
                 float4 ndcV2 = v2 / v2.w;
+                Debug.Log(ndcV0);
 
                 //转换屏幕坐标
                 float4 screenV0 = math.mul(screenMatrix, ndcV0);
@@ -581,7 +611,7 @@ public class OcclusionCulling : MonoBehaviour
                 {
                     depth = screenV2.z;
                 }
-
+                //Debug.Log(screenV0);
                 triangleInfoWriter.AddNoResize(new TriangleInfo()
                 {
                     v0 = screenV0,
@@ -627,10 +657,62 @@ public class OcclusionCulling : MonoBehaviour
     }
     #endregion
 
-    #region Collect Occluder Bounds Info
-    private void CollectOccluderBoundsInfo()
+    #region Collect Occludee Bounds Info
+    private void CollectOccludeeBoundsInfo()
     {
+        int occludeeBoundsCount = _occludeeMfIndex.Length;
+        dependency = new OccludeeBoundsJob()
+        {
+            screenMatirx = _screenMatrix,
+            vertexes = _occludeeClipVertexInfo,
+            boundsInfo = _occludeeBoundsInfoArray,
+        }.Schedule(occludeeBoundsCount, 16, dependency);
+    }
 
+    [BurstCompile]
+    private struct OccludeeBoundsJob : IJobParallelFor
+    {
+        [ReadOnly]
+        public Matrix4x4 screenMatirx;
+        [ReadOnly]
+        public NativeArray<float4> vertexes;
+        [NativeDisableParallelForRestriction]
+        public NativeArray<ScreenBoundsInfo> boundsInfo;
+        public void Execute(int index)
+        {
+            int start = index * 8;
+            int end = (index + 1) * 8;
+            float4 min = new float4(float.MaxValue, float.MaxValue, float.MaxValue, float.MaxValue);
+            float4 max = new float4(float.MinValue, float.MinValue, float.MinValue, float.MinValue);
+            float minDepth = float.MaxValue;
+            for (int i = start; i < end; i++)
+            {
+                float4 vertex = vertexes[i];
+                float4 ndcResult = vertex / vertex.w;
+                float4 screenResult = math.mul(screenMatirx, ndcResult);
+
+                if (screenResult.x < min.x && screenResult.y < min.y)
+                {
+                    min = screenResult;
+                }
+
+                if (screenResult.x > max.x && screenResult.y > max.y)
+                {
+                    max = screenResult;
+                }
+
+                if (screenResult.z < minDepth)
+                {
+                    minDepth = screenResult.z;
+                }
+            }
+            boundsInfo[index] = new ScreenBoundsInfo()
+            {
+                min = min,
+                max = max,
+                minDepth = minDepth
+            };
+        }
     }
     #endregion
 }
