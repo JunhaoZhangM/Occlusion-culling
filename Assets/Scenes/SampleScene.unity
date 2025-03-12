@@ -877,6 +877,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   root: {fileID: 175864437}
+  occluderCount: 0
+  occludeeCount: 0
+  needDebug: 0
 --- !u!1 &211519431
 GameObject:
   m_ObjectHideFlags: 0

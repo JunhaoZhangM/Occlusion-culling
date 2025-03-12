@@ -16,5 +16,10 @@ public struct TriangleInfo
     public float4 v2;
 
     public float maxDepth;
+
+    public float CalculateSlope(float4 v0,float4 v1)
+    {
+        return (v0.x - v1.x) / (v0.y - v1.y);
+    }
 }
 

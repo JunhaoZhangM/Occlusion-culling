@@ -73,6 +73,12 @@ public class OcclusionCulling : MonoBehaviour
     private NativeArray<ScreenBoundsInfo> _occludeeBoundsInfoArray;
     #endregion
 
+    #region Rasterization
+    private static int tileRow = Screen.height;
+    private static int tileCol = Screen.width / 32;
+    private static int tileCount = tileRow * tileCol;
+    private NativeArray<uint> _triangleMaskArray;
+    #endregion
 
     private NativeArray<bool> _objectsVisibility;
     // Start is called before the first frame update
@@ -86,9 +92,10 @@ public class OcclusionCulling : MonoBehaviour
         _screenHeight = Screen.height;
         _screenArea = _screenWidth * _screenHeight;
         _screenMatrix = new float4x4(
-            new float4(_screenWidth * 0.5f, 0, 0, _screenWidth * 0.5f),
-            new float4(0, _screenHeight * 0.5f, 0, _screenHeight * 0.5f),
-            new float4(0, 0, 1, 0), new float4(0, 0, 0, 1));
+            new float4(_screenWidth * 0.5f, 0, 0, 0),
+            new float4(0, _screenHeight * 0.5f, 0, 0),
+            new float4(0, 0, 1, 0), 
+            new float4(_screenWidth * 0.5f, _screenHeight * 0.5f, 0, 1));
 
         _meshFilters = new List<MeshFilter>();
         _frustumPlanes = new NativeArray<FrustumPlane>(6, Allocator.Persistent);
@@ -113,6 +120,8 @@ public class OcclusionCulling : MonoBehaviour
 
         _occluderTriangleInfoList = new NativeList<TriangleInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
         _occludeeBoundsInfoArray = new NativeArray<ScreenBoundsInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
+
+        _triangleMaskArray = new NativeArray<uint>(tileCount, Allocator.Persistent);
     }
     private void OnDestroy()
     {
@@ -199,80 +208,6 @@ public class OcclusionCulling : MonoBehaviour
         }
         _objectCount = _meshFilters.Count;
     }
-    /// <summary>
-    /// 视锥剔除主函数
-    /// </summary>
-    /// <param name="camera"></param>
-    //private void FrustumCullingSIMD(Camera camera)
-    //{
-    //    _meshFilters = new List<MeshFilter>(root.GetComponentsInChildren<MeshFilter>());
-
-    //    // 获得视锥平面
-    //    Plane[] planes = GeometryUtility.CalculateFrustumPlanes(camera);
-
-    //    for (int i = 0; i < 6; i++)
-    //    {
-    //        // 构建 SIMD加速数据结构
-    //        _frustumPlanes[i] = new FrustumPlane(planes[i].normal, planes[i].distance);
-    //    }
-
-    //    objectCount = _meshFilters.Count;
-    //    for (int i = 0; i < objectCount; i++)
-    //    {
-    //        Bounds bounds = _meshFilters[i].mesh.bounds;
-
-    //        // 将 bounds 转化成 世界 bounds
-    //        Vector3 worldCenter = _meshFilters[i].transform.TransformPoint(bounds.center);
-    //        Vector3 worldExtents = _meshFilters[i].transform.TransformVector(bounds.extents);
-
-    //        _worldBounds[i] = new FrustumBounds(worldCenter, worldExtents);
-    //    }
-
-    //    dependency = new FrustumVisibilityJob()
-    //    {
-    //        boundses = _worldBounds,
-    //        frustumPlane = _frustumPlanes,
-    //        objectsFrustumVibility = _objectsVisibility
-    //    }.Schedule(objectCount, 10, dependency);
-
-    //    dependency.Complete();
-
-    //    // 根据结果 先进行 视锥剔除
-    //    for (int i = 0; i < objectCount; i++)
-    //    {
-    //        _meshFilters[i].GetComponent<MeshRenderer>().enabled = _objectsVisibility[i];
-    //    }
-    //}
-
-    //public struct FrustumVisibilityJob : IJobParallelFor
-    //{
-    //    public NativeArray<FrustumBounds> boundses;
-    //    public NativeArray<FrustumPlane> frustumPlane;
-    //    public NativeArray<bool> objectsFrustumVibility;
-
-    //    public void Execute(int index)
-    //    {
-    //        FrustumBounds aabb = boundses[index];
-    //        foreach (var plane in frustumPlane)
-    //        {
-    //            // 平面法向量方向的半轴长度
-    //            float maxExtent = Mathf.Max(
-    //                math.abs(aabb.extents.x * plane.normal.x),
-    //                math.abs(aabb.extents.y * plane.normal.y),
-    //                math.abs(aabb.extents.z * plane.normal.z)
-    //            );
-
-    //            // 计算中心点到平面的距离
-    //            float centerDistance = math.dot(plane.normal, aabb.center) + plane.distanceToOrigin;
-
-    //            // 如果中心距离 - 半轴长度 < 0，则整个AABB在平面外侧
-    //            if (centerDistance < -maxExtent)
-    //                objectsFrustumVibility[index] = false; 
-    //                return;
-    //        }
-    //        objectsFrustumVibility[index] = true;
-    //    }
-    //}
     #endregion
 
     #region Select Occluder
@@ -291,7 +226,6 @@ public class OcclusionCulling : MonoBehaviour
         _occludeeMfIndex.Clear();
         dependency = new OccluderCollectJob()
         {
-            vMatrix = _mainCamera.worldToCameraMatrix,
             pMatrix = _mainCamera.projectionMatrix,
             viewOrigin = new float4(_mainCamera.transform.position, 0),
             screenArea = _screenArea,
@@ -320,9 +254,7 @@ public class OcclusionCulling : MonoBehaviour
     private struct OccluderCollectJob : IJobParallelFor
     {
         [ReadOnly]
-        public Matrix4x4 vMatrix;
-        [ReadOnly]
-        public Matrix4x4 pMatrix;
+        public float4x4 pMatrix;
         [ReadOnly]
         public float4 viewOrigin;
         [ReadOnly]
@@ -344,8 +276,8 @@ public class OcclusionCulling : MonoBehaviour
             float radius = boundsInfo.radius;
             float dist = math.distance(center, viewOrigin);
 
-            float projScaleX = pMatrix.m00; // 对应水平方向缩放因子
-            float projScaleY = pMatrix.m11; // 对应垂直方向缩放因子
+            float projScaleX = pMatrix[0].x; // 对应水平方向缩放因子
+            float projScaleY = pMatrix[1].y; // 对应垂直方向缩放因子
 
             // 4. 计算屏幕空间缩放因子（考虑视口分辨率）
             float screenScaleX = 0.5f * screenWidth * projScaleX;
@@ -550,7 +482,7 @@ public class OcclusionCulling : MonoBehaviour
     private struct OccluderTriangleJob : IJobParallelFor
     {
         [ReadOnly]
-        public Matrix4x4 screenMatrix;
+        public float4x4 screenMatrix;
         [ReadOnly]
         public NativeArray<int4> triangleIndexes;
         [ReadOnly]
@@ -572,13 +504,11 @@ public class OcclusionCulling : MonoBehaviour
                 float4 ndcV0 = v0 / v0.w;
                 float4 ndcV1 = v1 / v1.w;
                 float4 ndcV2 = v2 / v2.w;
-                Debug.Log(ndcV0);
 
                 //转换屏幕坐标
                 float4 screenV0 = math.mul(screenMatrix, ndcV0);
                 float4 screenV1 = math.mul(screenMatrix, ndcV1);
                 float4 screenV2 = math.mul(screenMatrix, ndcV2);
-
                 if (screenV0.y > screenV1.y)
                 {
                     float4 tmp = screenV0;
@@ -611,7 +541,7 @@ public class OcclusionCulling : MonoBehaviour
                 {
                     depth = screenV2.z;
                 }
-                //Debug.Log(screenV0);
+               
                 triangleInfoWriter.AddNoResize(new TriangleInfo()
                 {
                     v0 = screenV0,
@@ -673,7 +603,7 @@ public class OcclusionCulling : MonoBehaviour
     private struct OccludeeBoundsJob : IJobParallelFor
     {
         [ReadOnly]
-        public Matrix4x4 screenMatirx;
+        public float4x4 screenMatirx;
         [ReadOnly]
         public NativeArray<float4> vertexes;
         [NativeDisableParallelForRestriction]
@@ -712,6 +642,53 @@ public class OcclusionCulling : MonoBehaviour
                 max = max,
                 minDepth = minDepth
             };
+        }
+    }
+    #endregion
+
+    #region
+
+    private struct OccluderTriangleRasterizeJob : IJobParallelFor
+    {
+        [ReadOnly]
+        private NativeArray<TriangleInfo> triangles;
+        [NativeDisableParallelForRestriction]
+        private NativeArray<float> tileDepth0Array;
+        [NativeDisableParallelForRestriction]
+        private NativeArray<float> tileDepth1Array;
+        [NativeDisableParallelForRestriction]
+        private NativeArray<uint> tileMaskArray;
+        public void Execute(int index)
+        {
+            TriangleInfo triangle = triangles[index];
+            float4 lowestVertex = triangle.v0;
+            float4 middleVertex = triangle.v1;
+            float4 highestVertex = triangle.v2;
+            float minx = math.min(lowestVertex.x, middleVertex.x);
+            minx = math.min(minx, highestVertex.x);
+            float maxx = math.max(lowestVertex.x, middleVertex.x);
+            maxx = math.min(maxx, highestVertex.x);
+            int startCol = math.max(0, (int)minx / 4);
+            int endCol = (int)maxx / 4;
+            int startRow = math.max(0, (int)lowestVertex.y / 8);
+            int endRow = (int)highestVertex.y / 8;
+            int midRow = (int)(lowestVertex.y) / 4;
+            float v0v1Slope = triangle.CalculateSlope(lowestVertex, middleVertex);
+            float v0v2Slope = triangle.CalculateSlope(lowestVertex, highestVertex);
+            float leftSlope = v0v1Slope;
+            float rightSlope = v0v2Slope;
+            if (leftSlope > rightSlope)
+            {
+                leftSlope = v0v2Slope;
+                rightSlope = v0v1Slope;
+            }
+            for(int i= startRow; i < midRow; i++)
+            {
+                for(int j = startCol; j < startCol; j++)
+                {
+
+                }
+            }
         }
     }
     #endregion
