@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.Mathematics;
 
 /// <summary>
@@ -17,9 +18,15 @@ public struct TriangleInfo
 
     public float maxDepth;
 
+
     public float CalculateSlope(float4 v0,float4 v1)
     {
         return (v0.x - v1.x) / (v0.y - v1.y);
+    }
+
+    public float GetMiddleOtherSideX(float otherSlope)
+    {
+        return v0.x + (v1.y - v0.y) * otherSlope;
     }
 }
 
