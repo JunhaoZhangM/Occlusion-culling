@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -75,13 +76,19 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
     private NativeArray<ScreenBoundsInfo> _occludeeBoundsInfoArray;
 
     //Rasterize Occluder Triangle
-    private static int tileRow = Screen.height;
-    private static int tileCol = Screen.width / 32;
-    private static int tileCount = tileRow * tileCol;
-    private NativeList<uint> _triangleMaskList;
+    private int tileRow;
+    private int tileCol;
+    private int tileCount;
+    private int _trianglePerTile = 20;
+    // 用于记录每个tile被哪些三角形遮挡，每个tile上限记录_trianglePerTile个三角形
+    private NativeArray<uint> _tileTriMaskArray;
+    // 跟mask一一对应的深度值
+    private NativeArray<float> _tileTriDethArray;
+    // 记录每个tile被几个三角形影响，用来限定遍历范围
+    private NativeArray<int> _tileTriCounterArray;
     private NativeArray<TileInfo> _tileNativeArray;
 
-    private NativeArray<bool> _objectsVisibility;
+    private NativeArray<bool> _occludeeVisibility;
     // Start is called before the first frame update
 
     void Awake()
@@ -98,10 +105,14 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
             new float4(0, 0, 1, 0),
             new float4(_screenWidth * 0.5f, _screenHeight * 0.5f, 0, 1));
 
+        tileRow = Screen.height;
+        tileCol = Screen.width / 32;
+        tileCount = tileRow * tileCol;
+
         _meshFilters = new List<MeshFilter>();
         _frustumPlanes = new NativeArray<FrustumPlane>(6, Allocator.Persistent);
         _inFrustumBounds = new NativeList<BoundsInfo>(Allocator.Persistent);
-        _objectsVisibility = new NativeArray<bool>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
+        _occludeeVisibility = new NativeArray<bool>(DEFAULT_CONTAINER_SIZE, Allocator.Persistent);
 
         _occluderMfIndex = new NativeList<int>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
         _occludeeMfIndex = new NativeList<int>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
@@ -122,7 +133,9 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
         _occluderTriangleInfoList = new NativeList<TriangleInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
         _occludeeBoundsInfoArray = new NativeArray<ScreenBoundsInfo>(DEFAULT_CONTAINER_SIZE / 3, Allocator.Persistent);
 
-        _triangleMaskList = new NativeList<uint>(Allocator.Persistent);
+        _tileTriMaskArray = new NativeArray<uint>(tileCount * _trianglePerTile, Allocator.Persistent);
+        _tileTriDethArray = new NativeArray<float>(tileCount * _trianglePerTile, Allocator.Persistent);
+        _tileTriCounterArray = new NativeArray<int>(tileCount, Allocator.Persistent);
         _tileNativeArray = new NativeArray<TileInfo>(tileCount, Allocator.Persistent);
     }
     private void OnDestroy()
@@ -130,9 +143,11 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
         dependency.Complete();
         _frustumPlanes.Dispose();
         _inFrustumBounds.Dispose();
-        _objectsVisibility.Dispose();
+        _occludeeVisibility.Dispose();
         _occluderMfIndex.Dispose();
         _occludeeMfIndex.Dispose();
+        _occluderVertexInfo.Dispose();
+        _occludeeBoundsVertexInfo.Dispose();
         _occluderTriangleIndex.Dispose();
         _occluderMatrixList.Dispose();
         _occludeeMatrixList.Dispose();
@@ -140,7 +155,9 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
         _occludeeClipVertexInfo.Dispose();
         _occluderTriangleInfoList.Dispose();
         _occludeeBoundsInfoArray.Dispose();
-        _triangleMaskList.Dispose();
+        _tileTriMaskArray.Dispose();
+        _tileTriDethArray.Dispose();
+        _tileTriCounterArray.Dispose();
         _tileNativeArray.Dispose();
 
         JobsUtility.ResetJobWorkerCount();
@@ -176,6 +193,10 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
 
         Profiler.BeginSample("Rasterize Occluder Triangle");
         RasterizeOccluderTriangle();
+        Profiler.EndSample();
+
+        Profiler.BeginSample("Occludee Depth Test");
+        TestOccludeeDepth();
         Profiler.EndSample();
     }
 
@@ -601,6 +622,8 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
             screenMatirx = _screenMatrix,
             vertexes = _occludeeClipVertexInfo,
             boundsInfo = _occludeeBoundsInfoArray,
+            screenWidth = _screenWidth,
+            screenHeight = _screenHeight
         }.Schedule(occludeeBoundsCount, jobBatchingStep, dependency);
 
         //排序三角形
@@ -615,6 +638,10 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
     private struct OccludeeBoundsJob : IJobParallelFor
     {
         [ReadOnly]
+        public float screenWidth;
+        [ReadOnly]
+        public float screenHeight;
+        [ReadOnly]
         public float4x4 screenMatirx;
         [ReadOnly]
         public NativeArray<float4> vertexes;
@@ -624,7 +651,7 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
         {
             int start = index * 8;
             int end = (index + 1) * 8;
-            float4 min = new float4(float.MaxValue, float.MaxValue, float.MaxValue, float.MaxValue);
+            float4 min = new float4(float.MaxValue, float.MaxValue, 0, 0);
             float4 max = new float4(float.MinValue, float.MinValue, float.MinValue, float.MinValue);
             float minDepth = float.MaxValue;
             for (int i = start; i < end; i++)
@@ -661,53 +688,88 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
     #region Rasterize Occluder Triangle
     private void RasterizeOccluderTriangle()
     {
-        _triangleMaskList.Clear();
-        _triangleMaskList.Resize(_occluderTriangleInfoList.Length * tileCount, NativeArrayOptions.UninitializedMemory);
-        dependency = new TileResetJob()
+        Profiler.BeginSample("TileResetJob");
+        dependency = new TileInfoResetJob()
         {
-            tileArray = _tileNativeArray
+            tileArray = _tileNativeArray,
+            tileTriCounter = _tileTriCounterArray,
         }.Schedule(tileCount, jobBatchingStep, dependency);
-        Profiler.BeginSample("OccluderTriangleRasterizeJob");
-        dependency = new OccluderTriangleRasterizeJob()
+
+        dependency = new TileDataResetJob()
         {
-            tileRow = tileRow,
-            tileCol = tileCol,
-            tileCount = tileCount,
-            triangleMask = _triangleMaskList,
-            triangles = _occluderTriangleInfoList.AsArray()
-        }.Schedule(_occluderTriangleInfoList.Length, jobBatchingStep, dependency);
+            tileTriMask = _tileTriMaskArray,
+            tileTriDepth = _tileTriDethArray,
+        }.Schedule(tileCount * _trianglePerTile, jobBatchingStep * 10, dependency);
+
         dependency.Complete();
+        Profiler.EndSample();
+
+        Profiler.BeginSample("OccluderTriangleRasterizeJob");
+        unsafe
+        {
+            dependency = new OccluderTriangleRasterizeJob()
+            {
+                tileRow = tileRow,
+                tileCol = tileCol,
+                tileCount = tileCount,
+                trianglePerTile = _trianglePerTile,
+                tileTriMask = _tileTriMaskArray,
+                tileTriDepth = _tileTriDethArray,
+                tileTriCounter = (int*)_tileTriCounterArray.GetUnsafePtr(),
+                triangles = _occluderTriangleInfoList.AsArray()
+            }.Schedule(_occluderTriangleInfoList.Length, jobBatchingStep, dependency);
+            dependency.Complete();
+        }
         Profiler.EndSample();
         Profiler.BeginSample("UpdateHizBufferJob");
         dependency = new UpdateHizBufferJob()
         {
-            triangleCount = _occluderTriangleInfoList.Length,
-            tileCount = tileCount,
-            triangleMask = _triangleMaskList,
-            triangles = _occluderTriangleInfoList.AsArray(),
+            trianglePerTile = _trianglePerTile,
+            tileTriMask = _tileTriMaskArray,
+            tileTriDepth = _tileTriDethArray,
+            tileTriCounter = _tileTriCounterArray,
             tileArray = _tileNativeArray
         }.Schedule(tileCount, jobBatchingStep, dependency);
         dependency.Complete();
         Profiler.EndSample();
     }
 
-    private struct TileResetJob : IJobParallelFor
+    [BurstCompile]
+    private struct TileInfoResetJob : IJobParallelFor
     {
         [NativeDisableParallelForRestriction]
         public NativeArray<TileInfo> tileArray;
+        [NativeDisableParallelForRestriction]
+        public NativeArray<int> tileTriCounter;
         public void Execute(int index)
         {
             tileArray[index] = new TileInfo()
             {
                 zMax0 = 1.0f,
                 zMax1 = 0,
-                mask = 0
+                mask = 0u,
             };
+            tileTriCounter[index] = 0; // 直接归零计数器
         }
     }
 
     [BurstCompile]
-    private struct OccluderTriangleRasterizeJob : IJobParallelFor
+    private struct TileDataResetJob : IJobParallelFor
+    {
+        public NativeArray<uint> tileTriMask;
+        public NativeArray<float> tileTriDepth;
+
+        public void Execute(int slotIndex)
+        {
+            tileTriMask[slotIndex] = 0u;
+            tileTriDepth[slotIndex] = 0f;
+        }
+    }
+
+    // 注意：原文中不是用一个三角形的深度替换他所有覆盖的tile的深度
+    // 而是记录在当前tile中三角形的最大深度
+    [BurstCompile]
+    private unsafe struct OccluderTriangleRasterizeJob : IJobParallelFor
     {
         [ReadOnly]
         public int tileRow;
@@ -715,14 +777,19 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
         public int tileCol;
         [ReadOnly]
         public int tileCount;
-        [NativeDisableParallelForRestriction]
-        public NativeArray<uint> triangleMask;
-        [NativeDisableParallelForRestriction]
+        [ReadOnly]
+        public int trianglePerTile;
+        [ReadOnly]
         public NativeArray<TriangleInfo> triangles;
+        [NativeDisableParallelForRestriction]
+        public NativeArray<uint> tileTriMask;
+        [NativeDisableParallelForRestriction]
+        public NativeArray<float> tileTriDepth;
+        [NativeDisableUnsafePtrRestriction]
+        public int* tileTriCounter;
         public void Execute(int index)
         {
             TriangleInfo triangle = triangles[index];
-            int maskStartIndex = index * tileCount;
             float4 lowestVertex = triangle.v0;
             float4 middleVertex = triangle.v1;
             float4 highestVertex = triangle.v2;
@@ -733,7 +800,7 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
             int startCol = math.max(0, (int)minx / 32);
             int endCol = math.min(tileCol - 1, (int)maxx / 32);
             int startRow = math.max(0, (int)lowestVertex.y);
-            int endRow = math.min(tileCol - 1, (int)highestVertex.y);
+            int endRow = math.min(tileRow - 1, (int)highestVertex.y);
             int midRow = math.clamp((int)(middleVertex.y), 0, tileRow - 1);
             float v0v1Slope = triangle.CalculateSlope(lowestVertex, middleVertex);
             float v0v2Slope = triangle.CalculateSlope(lowestVertex, highestVertex);
@@ -764,32 +831,57 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
                 int curX = rowStartX;
                 for (int j = startCol; j <= endCol; j++)
                 {
-                    int shiftLeft = math.clamp((int)leftX - curX, 0, 32);
+                    int tileIdx = i * tileCol + j;
+
+                    int shiftLeft = math.max((int)leftX - curX, 0);
                     uint leftEvent = (shiftLeft >= 32) ? 0u : (~0u >> shiftLeft);
 
-                    int shiftRight = math.clamp(curX - (int)rightX, 0, 32);
+                    int shiftRight = math.max((int)rightX - curX, 0);
                     uint rightEvent = (shiftRight >= 32) ? 0u : (~0u >> shiftRight);
 
-                    uint triMask = leftEvent & rightEvent;
-                    triangleMask[maskStartIndex + i * tileCol + j] = triMask;
+                    uint triMask = leftEvent & (~rightEvent);
+                    // 不为0说明对该tile存在影响
+                    if (triMask != 0u)
+                    {
+                        int triMaskIdx = Interlocked.Increment(ref tileTriCounter[tileIdx]) - 1;
+                        if (triMaskIdx < trianglePerTile)
+                        {
+                            int triIdx = tileIdx * trianglePerTile + triMaskIdx;
+                            tileTriMask[triIdx] = triMask;
+                            tileTriDepth[triIdx] = triangle.maxDepth;
+                        }
+                    }
                     curX += 32;
                 }
                 leftX += leftSlope;
                 rightX += rightSlope;
             }
 
-            // 中间节点所在行特判。
-            for (int j = startCol; j < endCol; j++)
+            // 中间节点所在行特判
+            for (int j = startCol; j <= endCol; j++)
             {
+                int tileIdx = midRow * tileCol + j;
+
                 int curX = j * 32;
-                int shiftLeft = math.clamp((int)midStartX - curX, 0, 32);
-                uint leftEvent = ~0u >> shiftLeft;
+                int shiftLeft = math.max((int)midStartX - curX, 0);
+                uint leftEvent = (shiftLeft >= 32) ? 0u : (~0u >> shiftLeft);
 
-                int shiftRight = math.clamp(curX - (int)midEndx, 0, 32);
-                uint rightEvent = ~0u >> shiftRight;
+                int shiftRight = math.max((int)midEndx - curX, 0);
+                uint rightEvent = (shiftRight >= 32) ? 0u : (~0u >> shiftRight);
 
-                uint triMask = leftEvent & rightEvent;
-                triangleMask[maskStartIndex + midRow * tileCol + j] = triMask;
+                uint triMask = leftEvent & (~rightEvent);
+
+                // 不为0说明对该tile存在影响
+                if (triMask != 0u)
+                {
+                    int triMaskIdx = Interlocked.Increment(ref tileTriCounter[tileIdx]) - 1;
+                    if (triMaskIdx < trianglePerTile)
+                    {
+                        int triIdx = tileIdx * trianglePerTile + triMaskIdx;
+                        tileTriMask[triIdx] = triMask;
+                        tileTriDepth[triIdx] = triangle.maxDepth;
+                    }
+                }
             }
 
             float v1v2Slope = triangle.CalculateSlope(middleVertex, highestVertex);
@@ -810,71 +902,59 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
                 int curX = rowStartX;
                 for (int j = startCol; j <= endCol; j++)
                 {
-                    int shiftLeft = math.clamp((int)leftX - curX, 0, 32);
+                    int tileIdx = i * tileCol + j;
+
+                    int shiftLeft = math.max((int)leftX - curX, 0);
                     uint leftEvent = (shiftLeft >= 32) ? 0u : (~0u >> shiftLeft);
 
-                    int shiftRight = math.clamp(curX - (int)rightX, 0, 32);
+                    int shiftRight = math.max((int)rightX - curX, 0);
                     uint rightEvent = (shiftRight >= 32) ? 0u : (~0u >> shiftRight);
 
-                    uint triMask = leftEvent & rightEvent;
-                    triangleMask[maskStartIndex + i * tileCol + j] = triMask;
+                    uint triMask = leftEvent & (~rightEvent);
+
+                    // 不为0说明对该tile存在影响
+                    if (triMask != 0u)
+                    {
+                        int triMaskIdx = Interlocked.Increment(ref tileTriCounter[tileIdx]) - 1;
+                        if (triMaskIdx < trianglePerTile)
+                        {
+                            int triIdx = tileIdx * trianglePerTile + triMaskIdx;
+                            tileTriMask[triIdx] = triMask;
+                            tileTriDepth[triIdx] = triangle.maxDepth;
+                        }
+                    }
                     curX += 32;
                 }
                 leftX -= leftSlope;
                 rightX -= rightSlope;
             }
         }
-
-
-        // 1.需要加非常多的原子操作
-        // 2.修改操作：为每个tile遍历所有三角形
-        // 3.放弃Mask，直接使用最大深度值进行更新,那么每次只需要锁住一个Z值就可以
-        //private void UpdateHiZBuffer(int row, int col, uint triMask, float triDepth)
-        //{
-        //    TileInfo tile = tileArray[row * tileCol + col];
-        //    float dist1t = tile.zMax1 - triDepth;
-        //    float dist01 = tile.zMax0 - tile.zMax1;
-
-        //    if (dist1t > dist01)
-        //    {
-        //        tile.zMax1 = 0;
-        //        tile.mask = 0;
-        //    }
-
-        //    tile.zMax1 = math.max(tile.zMax1, triDepth);
-
-        //    tile.mask |= triMask;
-        //    if (tile.mask == ~0u)
-        //    {
-        //        tile.zMax0 = tile.zMax1;
-        //        tile.zMax1 = 0;
-        //        tile.mask = 0;
-        //    }
-        //}
     }
+
 
     [BurstCompile]
     private struct UpdateHizBufferJob : IJobParallelFor
     {
         [ReadOnly]
-        public int triangleCount;
+        public int trianglePerTile;
         [ReadOnly]
-        public int tileCount;
+        public NativeArray<uint> tileTriMask;
         [ReadOnly]
-        public NativeArray<uint> triangleMask;
+        public NativeArray<float> tileTriDepth;
         [ReadOnly]
-        public NativeArray<TriangleInfo> triangles;
+        public NativeArray<int> tileTriCounter;
         [NativeDisableParallelForRestriction]
         public NativeArray<TileInfo> tileArray;
         public void Execute(int index)
         {
-            int cur = index;
-            for (int i = 0; i < triangleCount; i++)
+            int triangleCount = tileTriCounter[index];
+            int start = index * trianglePerTile;
+            int end = start + math.min(triangleCount, trianglePerTile);
+            for (int i = start; i < end; i++)
             {
-                uint triMask = triangleMask[cur];
-                if (triMask == 0) continue;
+                uint triMask = tileTriMask[i];
                 TileInfo tile = tileArray[index];
-                float triangleDepth = triangles[i].maxDepth;
+                float triangleDepth = tileTriDepth[i];
                 float dist1t = tile.zMax1 - triangleDepth;
                 float dist01 = tile.zMax0 - tile.zMax1;
                 if (dist1t > dist01)
@@ -890,9 +970,77 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
                     tile.zMax1 = 0;
                     tile.mask = 0;
                 }
-                cur += tileCount;
+                tileArray[index] = tile;
             }
 
+        }
+    }
+    #endregion
+
+    #region Occludee Depth Test
+    private void TestOccludeeDepth()
+    {
+        int occludeeCount = _occludeeMfIndex.Length;
+        dependency = new TestOccludeeDepthJob
+        {
+            tileInfos = _tileNativeArray,
+            boundsInfos = _occludeeBoundsInfoArray,
+            tileCol = tileCol,
+            tileRow = tileRow,
+            objectsVisibility = _occludeeVisibility
+        }.Schedule(occludeeCount, jobBatchingStep, dependency);
+
+        dependency.Complete();
+
+        for (int i = 0; i < occludeeCount; i++)
+        {
+            MeshFilter mf = _meshFilters[_occludeeMfIndex[i]];
+            MeshRenderer renderer = mf.GetComponent<MeshRenderer>();
+            if (_occludeeVisibility[i])
+            {
+                renderer.enabled = true;
+            }
+            else
+            {
+                renderer.enabled = false;
+            }
+        }
+    }
+
+    [BurstCompile]
+    private struct TestOccludeeDepthJob : IJobParallelFor
+    {
+        [ReadOnly]
+        public NativeArray<TileInfo> tileInfos;
+        [ReadOnly]
+        public NativeArray<ScreenBoundsInfo> boundsInfos;
+        [ReadOnly]
+        public int tileCol;
+        [ReadOnly]
+        public int tileRow;
+        [NativeDisableParallelForRestriction]
+        public NativeArray<bool> objectsVisibility;
+        public void Execute(int index)
+        {
+            ScreenBoundsInfo bounds = boundsInfos[index];
+            int startRow = math.max(0, (int)bounds.min.y);
+            int endRow = math.min(tileRow - 1, (int)bounds.max.y);
+            int startCol = math.max(0, (int)bounds.min.x / 32);
+            int endCol = math.min(tileCol - 1, (int)bounds.max.x / 32);
+            for (int i = startRow; i <= endRow; i++)
+            {
+                for (int j = startCol; j <= endCol; j++)
+                {
+                    int tileIdx = i * tileCol + j;
+                    TileInfo tile = tileInfos[tileIdx];
+                    if (tile.zMax0 > bounds.minDepth)
+                    {
+                        objectsVisibility[index] = true;
+                        return;
+                    }
+                }
+            }
+            objectsVisibility[index] = false;
         }
     }
     #endregion
