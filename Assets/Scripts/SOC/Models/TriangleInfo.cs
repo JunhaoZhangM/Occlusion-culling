@@ -21,7 +21,8 @@ public struct TriangleInfo
 
     public float CalculateSlope(float4 v0,float4 v1)
     {
-        return (v0.x - v1.x) / (v0.y - v1.y);
+        float slope = (v0.x - v1.x) / (v0.y - v1.y + float.Epsilon);
+        return slope;
     }
 
     public float GetMiddleOtherSideX(float otherSlope)

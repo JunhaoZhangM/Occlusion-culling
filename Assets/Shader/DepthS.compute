@@ -1,0 +1,54 @@
+#pragma require compute
+
+#pragma kernel CSMain
+
+RWTexture2D<float4> _Result;
+StructuredBuffer<float> _DepthBuffer;
+
+int _ScreenWidth;
+int _ScreenHeight;
+int _TileWidth;
+
+static const int COLOR_STEPS = 5;
+static const float3 COLORS[COLOR_STEPS] =
+{
+    float3(0, 0, 1), // Blue
+    float3(0, 1, 1), // Cyan
+    float3(0, 1, 0), // Green
+    float3(1, 1, 0), // Yellow
+    float3(1, 0, 0) // Red
+};
+static const float COLOR_POSITIONS[COLOR_STEPS] = { 0, 0.25, 0.5, 0.75, 1 };
+
+[numthreads(32, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    int tileX = id.x;
+    int tileY = id.y;
+    int tileIndex = tileX + tileY * (_ScreenWidth / _TileWidth);
+    
+    float depth = _DepthBuffer[tileIndex];
+    
+    float normalizedDepth = saturate(depth / 100.0);
+    
+    float3 color = float3(0, 0, 0);
+    for (int i = 0; i < COLOR_STEPS - 1; i++)
+    {
+        if (normalizedDepth >= COLOR_POSITIONS[i] && normalizedDepth <= COLOR_POSITIONS[i + 1])
+        {
+            float t = (normalizedDepth - COLOR_POSITIONS[i]) /
+                     (COLOR_POSITIONS[i + 1] - COLOR_POSITIONS[i]);
+            color = lerp(COLORS[i], COLORS[i + 1], t);
+            break;
+        }
+    }
+
+    for (int px = 0; px < _TileWidth; px++)
+    {
+        int pixelX = tileX * _TileWidth + px;
+        if (pixelX >= _ScreenWidth)
+            break;
+        
+        _Result[uint2(pixelX, tileY)] = float4(color, 1.0);
+    }
+}

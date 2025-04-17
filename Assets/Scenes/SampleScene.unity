@@ -867,6 +867,7 @@ GameObject:
   m_Component:
   - component: {fileID: 175864437}
   - component: {fileID: 175864438}
+  - component: {fileID: 175864439}
   m_Layer: 0
   m_Name: GameObjects
   m_TagString: Untagged
@@ -989,6 +990,24 @@ MonoBehaviour:
   needDebug: 0
   jobBatchingStep: 16
   jobWorkderCount: 8
+--- !u!114 &175864439
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 175864436}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2b7276697d6de5d47aaf35b6767f5957, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  root: {fileID: 175864437}
+  occluderCount: 0
+  occludeeCount: 0
+  needDebug: 0
+  jobBatchingStep: 16
+  jobWorkderCount: 4
 --- !u!1 &211519431
 GameObject:
   m_ObjectHideFlags: 0
