@@ -695,20 +695,34 @@ public class OcclusionCullingSingle : MonoBehaviour
                 midStartX = otherSideMiddleX;
                 midEndx = middleVertex.x;
             }
-            float leftX = lowestVertex.x;
-            float rightX = lowestVertex.x;
-            //取倒数，因为我们的tile是32*1的
-            //每增加一行正好增加1个y值，所以我们的斜率是x/y
-            //leftSlope = 1 / leftSlope;
-            //rightSlope = 1 / rightSlope;
-            int rowStartX = startCol * 32;
+            float leftX,rightX;
+            if (lowestVertex.y < 0)
+            {
+                // 计算出当前tile的起始点
+                // 这里的leftX和rightX是当前tile的左上角坐标
+                leftX = lowestVertex.x + (0 - lowestVertex.y) * leftSlope;
+                rightX = lowestVertex.x + (0 - lowestVertex.y) * rightSlope;
+            }
+            else
+            {
+                leftX = lowestVertex.x;
+                rightX = lowestVertex.x;
+            }
+                //取倒数，因为我们的tile是32*1的
+                //每增加一行正好增加1个y值，所以我们的斜率是x/y
+                //leftSlope = 1 / leftSlope;
+                //rightSlope = 1 / rightSlope;
+                int rowStartX = startCol * 32;
             for (int i = startRow; i < midRow; i++)
             {
                 int curX = rowStartX;
                 for (int j = startCol; j <= endCol; j++)
                 {
                     int tileIdx = i * tileCol + j;
-
+                    if (tileIdx == tileCount / 2 - tileCol / 2 - 2) 
+                    {
+                        Debug.Log("1");
+                    }
                     int shiftLeft = math.max((int)leftX - curX, 0);
                     uint leftEvent = (shiftLeft >= 32) ? 0u : (~0u >> shiftLeft);
 
@@ -760,6 +774,12 @@ public class OcclusionCullingSingle : MonoBehaviour
                 }
             }
 
+            if(middleVertex.y > _screenHeight)
+            {
+                //Debug.Log("middleVertex.y > _screenHeight");
+                continue;
+            }
+
             float v1v2Slope = triangle.CalculateSlope(middleVertex, highestVertex);
             if (otherSideMiddleX > middleVertex.x)
             {
@@ -773,6 +793,12 @@ public class OcclusionCullingSingle : MonoBehaviour
             // 从最高节点像下开始遍历
             leftX = highestVertex.x; ;
             rightX = highestVertex.x;
+            if(highestVertex.y > _screenHeight)
+            {
+                leftX -= (highestVertex.y - _screenHeight) * leftSlope;
+                rightX -= (highestVertex.y - _screenHeight) * rightSlope;
+            }
+
             for (int i = endRow; i > midRow; i--)
             {
                 int curX = rowStartX;

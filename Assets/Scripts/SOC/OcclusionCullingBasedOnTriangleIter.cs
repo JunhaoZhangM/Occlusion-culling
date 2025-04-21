@@ -831,8 +831,19 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
                 midStartX = otherSideMiddleX;
                 midEndx = middleVertex.x;
             }
-            float leftX = lowestVertex.x;
-            float rightX = lowestVertex.x;
+            float leftX, rightX;
+            if (lowestVertex.y < 0)
+            {
+                // 计算出当前tile的起始点
+                // 这里的leftX和rightX是当前tile的左上角坐标
+                leftX = lowestVertex.x + (0 - lowestVertex.y) * leftSlope;
+                rightX = lowestVertex.x + (0 - lowestVertex.y) * rightSlope;
+            }
+            else
+            {
+                leftX = lowestVertex.x;
+                rightX = lowestVertex.x;
+            }
             //取倒数，因为我们的tile是32*1的
             //每增加一行正好增加1个y值，所以我们的斜率是x/y
             //leftSlope = 1 / leftSlope;
@@ -896,6 +907,11 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
                 }
             }
 
+            if(middleVertex.y > 1080)
+            {
+                return;
+            }
+
             float v1v2Slope = triangle.CalculateSlope(middleVertex, highestVertex);
             if (otherSideMiddleX > middleVertex.x)
             {
@@ -909,6 +925,11 @@ public class OcclusionCullingBasedOnTriangleIter : MonoBehaviour
             // 从最高节点像下开始遍历
             leftX = highestVertex.x; ;
             rightX = highestVertex.x;
+            if (highestVertex.y > 1080)
+            {
+                leftX -= (highestVertex.y - 1080) * leftSlope;
+                rightX -= (highestVertex.y - 1080) * rightSlope;
+            }
             for (int i = endRow; i > midRow; i--)
             {
                 int curX = rowStartX;
